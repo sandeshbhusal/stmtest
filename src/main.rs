@@ -15,96 +15,71 @@ use stm32f3xx_hal_v2::{flash::ACR, pac::Peripherals, pac::FLASH};
 const UNLOCK_KEY1: u32 = 0x45670123;
 const UNLOCK_KEY2: u32 = 0xCDEF89AB;
 
-fn wait_ready(flash: &FLASH) {
-    while flash.sr.read().bsy().bit() {}
-}
-
-fn wipe_page(flash: &FLASH) {
-    wait_ready(flash);
-
-    unsafe {
-        flash.cr.write(|w| w.per().set_bit());
-        flash.ar.write(|w| w.bits(0x0800_1800));
-        flash.cr.write(|w| w.strt().set_bit());
-    }
-
-    wait_ready(flash);
-
-    if flash.sr.read().eop().bit_is_set() {
-        hprintln!("SOME FLASH OPERATION DONE> CLEAR");
-    } else {
-        hprintln!("NO FLASH OPERATION DONE> CLEAR");
-    }
-
-    flash.cr.write(|w| w.per().clear_bit());
+fn busy_wait(flash: &FLASH) {
+    while flash.sr.read().bsy().bit_is_set() {}
 }
 
 #[entry]
 fn main() -> ! {
     let dp = Peripherals::take().unwrap();
     let mut flash = dp.FLASH;
+    let page_addr = 0x0800_1800;
 
-    let addr = 0x0800_1800;
-
-    wait_ready(&flash);
-
-    // Unlock the flash
-    flash.keyr.write(|w| unsafe { w.bits(UNLOCK_KEY1) });
-    flash.keyr.write(|w| unsafe { w.bits(UNLOCK_KEY2) });
-
-    wipe_page(&flash);
-    
     unsafe {
-        if flash.cr.read().lock().bit_is_set() {
-            hprintln!(" =>>>>>>>>>>>>>>>>>>>>>>>> Flash memory is locked.");
+        flash.keyr.write(|w| w.bits(UNLOCK_KEY1));
+        flash.keyr.write(|w| w.bits(UNLOCK_KEY2));
+        flash.cr.write(|w| w.per().set_bit().strt().set_bit());
+
+        busy_wait(&flash);
+
+        flash.ar.write(|w| w.bits(page_addr));
+        flash
+            .cr
+            .write(|w| w.per().set_bit().strt().set_bit().pg().set_bit());
+
+        busy_wait(&flash);
+
+        if flash.sr.read().eop().bit_is_set() {
+            flash.sr.modify(|_, w| w.eop().clear_bit());
+            flash.cr.write(|w| w.per().clear_bit());
+        } else {
+            hprintln!("ERROR -> PAGE WAS NOT ERASED..").unwrap();
+            let pgerr = flash.sr.read().pgerr().bit_is_set();
+            if pgerr {
+                hprintln!("FLASH PROGRAMMING SEQ ERROR").unwrap();
+            }
+
+            let wrptrerr = flash.sr.read().wrprterr().bit_is_set();
+            if wrptrerr {
+                hprintln!("FLASH PROGRAMMING WRITE PROTECTION ERROR").unwrap();
+            }
         }
 
-        // Clear out the status register.
+        hprintln!("PAGE ERASE PART DONE.").unwrap();
+
+        // Reset status and control registers.
         flash.sr.write(|w| w.bits(0x0));
-        flash.cr.write(|w| w.pg().set_bit().strt().set_bit());
-        // flash.cr.modify(|k, w| unsafe { w.bits(0) });
+        flash.cr.write(|w| w.bits(0x0));
 
-        let data = 0x12;
-        flash.ar.write(|w| w.bits(addr));
-        ptr::write_volatile((addr as *mut u16), data);
-    }
+        busy_wait(&flash);
+        flash.cr.modify(|_, w| w.bits(0).pg().set_bit());
+        ptr::write_volatile(page_addr as *mut u16, 0xffff);
 
-    wait_ready(&flash);
+        busy_wait(&flash);
 
-    let bytes = [1u8, 2u8, 3u8];
+        let status = flash.sr.read().pgerr();
+        if status.bit_is_set() {
+            hprintln!("PROGRAMMING SEQ ERROR").unwrap();
+        }
 
-    flash.cr.modify(|_, w| w.pg().clear_bit());
+        let status = flash.sr.read().wrprterr();
+        if status.bit_is_set() {
+            hprintln!("WRITE PROTECTION ERROR").unwrap();
+        }
 
-    // Trivial errors handling.
-    let status = flash.sr.read();
-    let write_protection_err = status.wrprterr().bit_is_set();
-    let programming_seq_err = status.pgerr().bit_is_set();
-    let flash_op_done = status.eop().bit_is_set();
-    
-    if flash_op_done {
-        hprintln!("FLASH OPERATION DONE!").unwrap();
-    } else {
-        hprintln!("FLASH OPERATION NOT DONE!").unwrap();
-    }
-    
-    if write_protection_err {
-        hprintln!("WRITE PROTECTION ERROR!").unwrap();
-    }
-    if programming_seq_err {
-        hprintln!("PROGRAMMING SEQ ERROR!").unwrap();
-    }
-
-    flash.sr.write(|w| w.eop().clear_bit());
-    flash.cr.write(|w| w.pg().clear_bit());
-
-    // Lock the flash.
-    flash.cr.modify(|_, w| w.lock().set_bit());
-
-    unsafe {
-        let val = ptr::read_volatile(addr as *mut u32);
-        hprintln!("Written value is {}", val).unwrap();
+        let read_value = ptr::read_volatile(page_addr as *const u16) as u16;
+        hprintln!("READ VALUE IS: {}", read_value);
     }
 
     loop {}
 }
-
